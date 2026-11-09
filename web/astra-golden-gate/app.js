@@ -872,16 +872,16 @@
 
   function drawPaintSegment(seg, f0, f1) {
     if (f1 - f0 < 1e-5) return;
-    const x0 = lerp(seg.x0, seg.x1, f0);
-    const y0 = lerp(seg.y0, seg.y1, f0);
-    const z0 = lerp(seg.z0, seg.z1, f0);
-    const x1 = lerp(seg.x0, seg.x1, f1);
-    const y1 = lerp(seg.y0, seg.y1, f1);
-    const z1 = lerp(seg.z0, seg.z1, f1);
-    const [px0, py0] = paintPixel(x0, y0);
-    const [px1, py1] = paintPixel(x1, y1);
-    const w0 = strokeWidthPx(z0);
-    const w1 = strokeWidthPx(z1);
+
+    // Always calculate the dab lattice from the FULL segment, then select the
+    // sub-range [f0, f1]. During playback a segment is drawn in several small
+    // time slices; calculating the lattice from the slice itself made the
+    // indices inconsistent and left a sparse dotted trail. Seeking redrew the
+    // whole segment, which is why the progress bar looked correct.
+    const [px0, py0] = paintPixel(seg.x0, seg.y0);
+    const [px1, py1] = paintPixel(seg.x1, seg.y1);
+    const w0 = strokeWidthPx(seg.z0);
+    const w1 = strokeWidthPx(seg.z1);
     if (w0 <= 0.25 && w1 <= 0.25) return;
 
     const dist = Math.hypot(px1 - px0, py1 - py0);
@@ -895,7 +895,7 @@
 
     for (let i = from; i <= to; i++) {
       const t = i / steps;
-      const z = lerp(z0, z1, t);
+      const z = lerp(seg.z0, seg.z1, t);
       let w = lerp(w0, w1, t);
       if (w < 0.35) continue;
       const j1 = hash01(seed + i * 7);
@@ -1918,7 +1918,7 @@
   window.__ASTRA = {
     state, ROUNDS, seek, setRound, applyCameraPreset, togglePlay, play, pause,
     arm, camera, cam, renderer, paintCanvas, paintCtx, paintTexture, canvasMaterial,
-    BRUSH_STAMPS, drawPaintSegment, redrawPaintTo, strokeWidthPx,
+    BRUSH_STAMPS, drawPaintSegment, redrawPaintTo, advancePaintTo, strokeWidthPx,
     scene, previewScene, shadowPlane, dust, key,
   };
 

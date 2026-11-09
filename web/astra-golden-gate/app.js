@@ -1,9 +1,11 @@
 /* =========================================================================
    Astra · Golden Gate Bridge — painting-process reconstruction
    -------------------------------------------------------------------------
-   The action positions, durations and the three final canvases come from the
-   published GPT-6 Astra record (see data.js / README.md). Everything visual
-   in between is a browser reconstruction built with three.js.
+   The action positions, durations and palette choices come from the published
+   GPT-6 Astra record (see data.js / README.md); the recorded final canvases
+   are kept as references only. The painting itself is approximated in the
+   browser by depositing Canvas 2D brush dabs along the recorded trajectories,
+   with the dab width driven by the recorded brush height (z).
 
    Coordinate mapping
    ------------------
@@ -37,11 +39,6 @@
     foreground: '前景', detail: '细节', submit: '提交',
   };
   const FALLBACK_CLASS = { black: 'dark', purple: 'blue', brightred: 'red' };
-
-  const MASK_W = 768;
-  const MASK_H = 544;
-  const MASK_SCALE = MASK_W / 1024;
-  const MASK_STEP = 2.2; // px between stamps in the mask
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const lerp = (a, b, t) => a + (b - a) * t;
@@ -98,8 +95,10 @@
   }
 
   /* Width of a paint deposit as a function of the recorded brush height.
-     Calibrated against the recorded final canvas: broad sky/water passes are
-     ~40 px, fine hanger/cable work is ~7–9 px. Values are in painting pixels. */
+     Lower z means the brush is pressed closer to the paper, so the deposit is
+     wider; lifting the brush tapers it to a fine line. Calibrated against the
+     recorded canvases: broad sky/water passes are ~40 px, fine hanger/cable
+     work is ~7–9 px. Values are in painting pixels. */
   const WIDTH_TABLE = [
     [0.065, 43], [0.075, 40], [0.080, 34], [0.086, 26],
     [0.092, 19], [0.096, 15], [0.098, 13], [0.100, 10],
@@ -362,7 +361,7 @@
   canvasMesh.receiveShadow = false;
   scene.add(canvasMesh);
 
-  // Shadow-only overlay: the shader painting is unlit, so let the arm cast a
+  // Shadow-only overlay: the painting is unlit, so let the arm cast a
   // real shadow onto a transparent plane just above the paper.
   const shadowMat = new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.055, transparent: true, depthWrite: false });
   const shadowPlane = new THREE.Mesh(canvasGeo, shadowMat);
@@ -652,128 +651,298 @@
   const arm = new PandaArm();
 
   /* ---------------------------------------------------------------------
-     8. Paint masks (Canvas 2D) + painting shader
+     8. Canvas 2D paint surface
+     ---------------------------------------------------------------------
+     No recorded final pixels are used to paint the canvas. Every recorded
+     waypoint becomes a brush dab on a 1024 x 725 Canvas 2D surface; the dab
+     width is derived from the recorded brush height (z) through
+     strokeWidthPx(). The surface is uploaded as a CanvasTexture and shared
+     by the 3D paper and the flat LIVE CANVAS preview.
      --------------------------------------------------------------------- */
-  const maskCanvases = [];
-  const maskCtxs = [];
-  const maskTextures = [];
-  const maskDirty = new Array(CLASS_ORDER.length).fill(false);
+  const PAINT_W = 1024;
+  const PAINT_H = 725;
+  const PAINT_MARGIN = 6;
+  const PAINT_CLIP_RADIUS = 11;
+  const DAB_STEP = 1.15;
 
-  for (let i = 0; i < CLASS_ORDER.length; i++) {
-    const c = document.createElement('canvas');
-    c.width = MASK_W;
-    c.height = MASK_H;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, MASK_W, MASK_H);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.NoColorSpace;
-    tex.flipY = true;
-    tex.minFilter = THREE.LinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.generateMipmaps = false;
-    maskCanvases.push(c);
-    maskCtxs.push(ctx);
-    maskTextures.push(tex);
+  const PAPER_X0 = CANVAS.x0;
+  const PAPER_X1 = CANVAS.x1;
+  const PAPER_Y0 = CANVAS.y0;
+  const PAPER_Y1 = CANVAS.y1;
+
+  function roundedRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
   }
 
-  const shaderUniforms = {
-    uClass: { value: null },
-    uFinish: { value: 0 },
-    uPaper: { value: new THREE.Color(0xfbfaf3) },
-    uBrushUv: { value: new THREE.Vector2(0, 0) },
-    uBrushActive: { value: 0 },
-    uMask0: { value: maskTextures[0] },
-    uMask1: { value: maskTextures[1] },
-    uMask2: { value: maskTextures[2] },
-    uMask3: { value: maskTextures[3] },
-    uMask4: { value: maskTextures[4] },
-    uMask5: { value: maskTextures[5] },
-    uMask6: { value: maskTextures[6] },
-  };
+  function paperClipPath(ctx) {
+    roundedRectPath(
+      ctx,
+      PAINT_MARGIN,
+      PAINT_MARGIN,
+      PAINT_W - PAINT_MARGIN * 2,
+      PAINT_H - PAINT_MARGIN * 2,
+      PAINT_CLIP_RADIUS
+    );
+  }
 
-  const placeholderPainting = new THREE.CanvasTexture((() => {
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6D2B79F5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function makePaperBase() {
     const c = document.createElement('canvas');
-    c.width = c.height = 2;
-    const x = c.getContext('2d');
-    x.fillStyle = '#fbfaf3';
-    x.fillRect(0, 0, 2, 2);
+    c.width = PAINT_W;
+    c.height = PAINT_H;
+    const ctx = c.getContext('2d');
+    const rnd = mulberry32(107);
+    ctx.fillStyle = '#fbfaf3';
+    ctx.fillRect(0, 0, PAINT_W, PAINT_H);
+
+    const img = ctx.getImageData(0, 0, PAINT_W, PAINT_H);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const n = (rnd() - 0.5) * 2.6;
+      const warm = (rnd() - 0.5) * 1.6;
+      d[i] = clamp(d[i] + n + warm, 0, 255);
+      d[i + 1] = clamp(d[i + 1] + n, 0, 255);
+      d[i + 2] = clamp(d[i + 2] + n - warm * 0.7, 0, 255);
+    }
+    ctx.putImageData(img, 0, 0);
+
+    // Sparse paper fibres.
+    for (let i = 0; i < 420; i++) {
+      const x = rnd() * PAINT_W;
+      const y = rnd() * PAINT_H;
+      const len = 2 + rnd() * 15;
+      const a = rnd() * Math.PI;
+      ctx.strokeStyle = rnd() > 0.5 ? 'rgba(133,122,101,0.055)' : 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = 0.5 + rnd() * 0.8;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
+      ctx.stroke();
+    }
+
+    // Deckle edge: a very slightly uneven warm-grey rim.
+    ctx.strokeStyle = 'rgba(147,134,111,0.20)';
+    ctx.lineWidth = 1.1;
+    roundedRectPath(ctx, 3.5, 3.5, PAINT_W - 7, PAINT_H - 7, 9);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.lineWidth = 1;
+    roundedRectPath(ctx, 5.5, 5.5, PAINT_W - 11, PAINT_H - 11, 8);
+    ctx.stroke();
+
     return c;
-  })());
-  placeholderPainting.colorSpace = THREE.SRGBColorSpace;
+  }
+
+  const paperBase = makePaperBase();
+
+  const paintCanvas = document.createElement('canvas');
+  paintCanvas.width = PAINT_W;
+  paintCanvas.height = PAINT_H;
+  const paintCtx = paintCanvas.getContext('2d', { alpha: false, desynchronized: true });
+
+  const paintTexture = new THREE.CanvasTexture(paintCanvas);
+  paintTexture.colorSpace = THREE.SRGBColorSpace;
+  paintTexture.flipY = true;
+  paintTexture.minFilter = THREE.LinearMipmapLinearFilter;
+  paintTexture.magFilter = THREE.LinearFilter;
+  paintTexture.generateMipmaps = true;
+  paintTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
   const canvasMaterial = new THREE.MeshBasicMaterial({
-    map: placeholderPainting,
+    map: paintTexture,
     color: 0xffffff,
     toneMapped: false,
     side: THREE.FrontSide,
   });
 
-  canvasMaterial.onBeforeCompile = (shader) => {
-    shader.uniforms.uClass = shaderUniforms.uClass;
-    shader.uniforms.uFinish = shaderUniforms.uFinish;
-    shader.uniforms.uPaper = shaderUniforms.uPaper;
-    shader.uniforms.uBrushUv = shaderUniforms.uBrushUv;
-    shader.uniforms.uBrushActive = shaderUniforms.uBrushActive;
-    for (let i = 0; i < 7; i++) shader.uniforms['uMask' + i] = shaderUniforms['uMask' + i];
+  let paintClipped = false;
+  function resetPaint() {
+    if (paintClipped) {
+      paintCtx.restore();
+      paintClipped = false;
+    }
+    paintCtx.setTransform(1, 0, 0, 1, 0, 0);
+    paintCtx.globalAlpha = 1;
+    paintCtx.globalCompositeOperation = 'source-over';
+    paintCtx.drawImage(paperBase, 0, 0);
+    paintCtx.save();
+    paperClipPath(paintCtx);
+    paintCtx.clip();
+    paintClipped = true;
+    paintTexture.needsUpdate = true;
+  }
 
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <common>',
-      `#include <common>
-       uniform sampler2D uClass;
-       uniform sampler2D uMask0;
-       uniform sampler2D uMask1;
-       uniform sampler2D uMask2;
-       uniform sampler2D uMask3;
-       uniform sampler2D uMask4;
-       uniform sampler2D uMask5;
-       uniform sampler2D uMask6;
-       uniform float uFinish;
-       uniform vec3 uPaper;
-       uniform vec2 uBrushUv;
-       uniform float uBrushActive;
-       float paintHash(vec2 p) {
-         return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
-       }`
-    );
+  // ---- Brush stamps ------------------------------------------------------
+  function makeBrushStamp(hex, variant) {
+    const S = 128;
+    const alpha = document.createElement('canvas');
+    alpha.width = alpha.height = S;
+    const a = alpha.getContext('2d');
 
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <map_fragment>',
-      `vec3 painted = texture2D(map, vMapUv).rgb;
-       float cid = floor(texture2D(uClass, vMapUv).r * 255.0 / 32.0 + 0.5);
-       float m = 0.0;
-       if (cid < 0.5) m = texture2D(uMask0, vMapUv).r;
-       else if (cid < 1.5) m = texture2D(uMask1, vMapUv).r;
-       else if (cid < 2.5) m = texture2D(uMask2, vMapUv).r;
-       else if (cid < 3.5) m = texture2D(uMask3, vMapUv).r;
-       else if (cid < 4.5) m = texture2D(uMask4, vMapUv).r;
-       else if (cid < 5.5) m = texture2D(uMask5, vMapUv).r;
-       else m = texture2D(uMask6, vMapUv).r;
-       m = smoothstep(0.02, 0.32, m);
+    a.save();
+    a.translate(S / 2, S / 2);
+    a.scale(1, 0.62 + variant * 0.012);
+    const g = a.createRadialGradient(0, 0, S * 0.08, 0, 0, S * 0.5);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.52, 'rgba(255,255,255,0.99)');
+    g.addColorStop(0.76, 'rgba(255,255,255,0.72)');
+    g.addColorStop(0.92, 'rgba(255,255,255,0.22)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    a.fillStyle = g;
+    a.beginPath();
+    a.arc(0, 0, S * 0.5, 0, Math.PI * 2);
+    a.fill();
+    a.restore();
 
-       vec2 paperPx = floor(vMapUv * vec2(1024.0, 725.0));
-       float grain = paintHash(paperPx);
-       vec3 paper = uPaper * (0.982 + 0.028 * grain);
+    // Bristle grooves and a few dry spots.
+    a.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 64; i++) {
+      const x = Math.random() * S;
+      const len = (0.36 + Math.random() * 0.52) * S;
+      a.fillStyle = 'rgba(0,0,0,' + (0.008 + Math.random() * 0.05) + ')';
+      a.fillRect(x, (S - len) / 2, 0.7 + Math.random() * 1.7, len);
+    }
+    for (let i = 0; i < 26; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const rad = S * (0.37 + Math.random() * 0.12);
+      const x = S / 2 + Math.cos(ang) * rad;
+      const y = S / 2 + Math.sin(ang) * rad * 0.62;
+      a.fillStyle = 'rgba(0,0,0,' + (0.04 + Math.random() * 0.10) + ')';
+      a.beginPath();
+      a.arc(x, y, 1 + Math.random() * 3.2, 0, Math.PI * 2);
+      a.fill();
+    }
+    a.globalCompositeOperation = 'source-over';
 
-       vec3 lit = painted * (0.968 + 0.062 * (1.0 - vMapUv.y));
-       float edge = smoothstep(0.0, 0.38, m) * (1.0 - smoothstep(0.55, 1.0, m));
-       lit *= 1.0 - 0.035 * edge;
+    const out = document.createElement('canvas');
+    out.width = out.height = S;
+    const o = out.getContext('2d');
+    o.drawImage(alpha, 0, 0);
+    o.globalCompositeOperation = 'source-in';
+    o.fillStyle = hex;
+    o.fillRect(0, 0, S, S);
+    o.globalCompositeOperation = 'source-atop';
+    for (let i = 0; i < 42; i++) {
+      o.fillStyle = Math.random() > 0.5
+        ? 'rgba(255,255,255,0.022)'
+        : 'rgba(0,0,0,0.020)';
+      o.fillRect(Math.random() * S, 0, 0.7 + Math.random() * 1.6, S);
+    }
+    return out;
+  }
 
-       vec3 col = mix(paper, lit, m);
-       // The recorded PNG takes over for the final seal.
-       col = mix(col, painted, uFinish);
+  const BRUSH_STAMPS = CLASS_ORDER.map((id) =>
+    Array.from({ length: 5 }, (_, v) => makeBrushStamp(PAL_BY_ID[id].hex, v))
+  );
 
-       float d = distance(vMapUv, uBrushUv);
-       float sheen = exp(-d * d * 2600.0);
-       col += vec3(1.0, 0.92, 0.80) * sheen * 0.11 * uBrushActive;
+  // ---- Dab deposition ----------------------------------------------------
+  function paintPixel(x, y) {
+    return [
+      ((x - PAPER_X0) / CW) * PAINT_W,
+      ((PAPER_Y0 - y) / CH) * PAINT_H,
+    ];
+  }
 
-       diffuseColor.rgb = col;
-       diffuseColor.a = 1.0;`
-    );
-  };
+  function hash01(n) {
+    n = Math.imul(n ^ (n >>> 16), 0x45d9f3b);
+    n = Math.imul(n ^ (n >>> 16), 0x45d9f3b);
+    n ^= n >>> 16;
+    return (n >>> 0) / 4294967296;
+  }
 
+  function drawPaintSegment(seg, f0, f1) {
+    if (f1 - f0 < 1e-5) return;
+    const x0 = lerp(seg.x0, seg.x1, f0);
+    const y0 = lerp(seg.y0, seg.y1, f0);
+    const z0 = lerp(seg.z0, seg.z1, f0);
+    const x1 = lerp(seg.x0, seg.x1, f1);
+    const y1 = lerp(seg.y0, seg.y1, f1);
+    const z1 = lerp(seg.z0, seg.z1, f1);
+    const [px0, py0] = paintPixel(x0, y0);
+    const [px1, py1] = paintPixel(x1, y1);
+    const w0 = strokeWidthPx(z0);
+    const w1 = strokeWidthPx(z1);
+    if (w0 <= 0.25 && w1 <= 0.25) return;
+
+    const dist = Math.hypot(px1 - px0, py1 - py0);
+    if (dist < 0.01) return;
+    const steps = Math.max(1, Math.ceil(dist / DAB_STEP));
+    const angle = Math.atan2(py1 - py0, px1 - px0);
+    const stamps = BRUSH_STAMPS[seg.color] || BRUSH_STAMPS[0];
+    const from = Math.max(0, Math.floor(f0 * steps) - 1);
+    const to = Math.min(steps, Math.ceil(f1 * steps) + 1);
+    const seed = seg.id * 1000003;
+
+    for (let i = from; i <= to; i++) {
+      const t = i / steps;
+      const z = lerp(z0, z1, t);
+      let w = lerp(w0, w1, t);
+      if (w < 0.35) continue;
+      const j1 = hash01(seed + i * 7);
+      const j2 = hash01(seed + i * 7 + 1);
+      const j3 = hash01(seed + i * 7 + 2);
+      const j4 = hash01(seed + i * 7 + 3);
+      w *= 0.955 + j1 * 0.09;
+      const x = px0 + (px1 - px0) * t + (j2 - 0.5) * 0.85;
+      const y = py0 + (py1 - py0) * t + (j3 - 0.5) * 0.85;
+      const a = angle + (j4 - 0.5) * 0.07;
+      const stamp = stamps[Math.floor(hash01(seed + i * 7 + 4) * stamps.length)];
+      paintCtx.save();
+      paintCtx.translate(x, y);
+      paintCtx.rotate(a - Math.PI / 2);
+      paintCtx.drawImage(stamp, -w / 2, -w / 2, w, w);
+      paintCtx.restore();
+    }
+  }
+
+  function redrawPaintTo(time) {
+    resetPaint();
+    for (const seg of state.round.segs) {
+      if (seg.t0 >= time) break;
+      const f1 = clamp((time - seg.t0) / Math.max(1e-6, seg.t1 - seg.t0), 0, 1);
+      drawPaintSegment(seg, 0, f1);
+    }
+    paintTexture.needsUpdate = true;
+    state.lastDrawTime = time;
+  }
+
+  function advancePaintTo(prevTime, newTime) {
+    let drew = false;
+    for (const seg of state.round.segs) {
+      if (seg.t0 >= newTime) break;
+      if (seg.t1 <= prevTime) continue;
+      const a = Math.max(seg.t0, prevTime);
+      const b = Math.min(seg.t1, newTime);
+      if (b <= a) continue;
+      const f0 = (a - seg.t0) / Math.max(1e-6, seg.t1 - seg.t0);
+      const f1 = (b - seg.t0) / Math.max(1e-6, seg.t1 - seg.t0);
+      drawPaintSegment(seg, f0, f1);
+      drew = true;
+    }
+    if (drew) paintTexture.needsUpdate = true;
+  }
+
+  resetPaint();
   canvasMesh.material = canvasMaterial;
 
   // Preview scene: a flat, orthographic view of the same paper/material.
@@ -840,7 +1009,6 @@
     let prevRaw = INITIAL_TIP.clone();
     let prevZ = 0.210012;
     let color = -1;
-    let finishStart = null;
     let recordedTime = 0;
 
     actions.forEach((a, ai) => {
@@ -851,7 +1019,6 @@
 
       if (!a.wps.length) {
         // SubmitPainting
-        if (finishStart === null) finishStart = a.startTime;
         t += 0.9;
         keyframes.push({ t, p: prevRaw.clone(), action: ai });
         a.endTime = t;
@@ -867,16 +1034,8 @@
         t += dur;
         keyframes.push({ t, p: raw.clone(), action: ai, wp: j });
 
-        // Paint dip at this waypoint?
-        if (w[0] < -0.15 && w[2] <= 0.12) {
-          const well = nearestWell(w[0], w[1]);
-          if (well) {
-            color = wellClass(well);
-            dips.push({ t, color, well, action: ai });
-          }
-        }
-
-        // Paint deposit between the previous and current waypoint.
+        // Deposit paint with the colour currently on the brush. A dip at
+        // this waypoint only changes the colour for the following segment.
         if (color >= 0) {
           const span = clipStroke(prevRaw, prevZ, raw, w[2]);
           if (span) {
@@ -889,6 +1048,7 @@
             const zz0 = lerp(prevZ, w[2], a0);
             const zz1 = lerp(prevZ, w[2], a1);
             segs.push({
+              id: segs.length,
               t0: segStart + dur * a0,
               t1: segStart + dur * a1,
               color,
@@ -898,16 +1058,24 @@
           }
         }
 
+        // Pick up paint at the palette for the next segment.
+        if (w[0] < -0.15 && w[2] <= 0.12) {
+          const well = nearestWell(w[0], w[1]);
+          if (well) {
+            color = wellClass(well);
+            dips.push({ t, color, well, action: ai });
+          }
+        }
+
         prevRaw = raw;
         prevZ = w[2];
       }
       a.endTime = t;
     });
 
-    // Tail: let the final seal finish.
+    // A short tail so completion lands after the last recorded action.
     t += 1.6;
     keyframes.push({ t, p: prevRaw.clone(), action: Math.max(0, actions.length - 1) });
-    if (finishStart === null) finishStart = Math.max(0, t - 1.6);
     segs.sort((a, b) => a.t0 - b.t0 || a.t1 - b.t1);
 
     return {
@@ -919,117 +1087,11 @@
       dips,
       total: t,
       recordedTime,
-      finishStart,
       painting: data.painting,
-      paintingRaw: data.paintingRaw,
-      paintingW: data.paintingW,
-      paintingH: data.paintingH,
-      classmap: data.classmap,
-      classmapRaw: data.classmapRaw,
-      classmapW: data.classmapW,
-      classmapH: data.classmapH,
     };
   }
 
   const ROUNDS = DATA.rounds.map((r, i) => buildRound(r, i));
-
-  /* ---------------------------------------------------------------------
-     10. Textures load
-     --------------------------------------------------------------------- */
-  function dataUrlToBlob(url) {
-    const comma = url.indexOf(',');
-    const head = url.slice(0, comma);
-    const mime = (/data:([^;]+)/.exec(head) || [, 'application/octet-stream'])[1];
-    const b64 = url.slice(comma + 1);
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new Blob([bytes], { type: mime });
-  }
-
-  function configureTexture(tex, { srgb, nearest }) {
-    tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-    if (nearest) {
-      tex.minFilter = THREE.NearestFilter;
-      tex.magFilter = THREE.NearestFilter;
-      tex.generateMipmaps = false;
-    } else {
-      tex.minFilter = THREE.LinearMipmapLinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tex.generateMipmaps = true;
-      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    }
-    return tex;
-  }
-
-  async function decompressBase64(b64) {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const ds = new DecompressionStream('gzip');
-    const stream = new Blob([bytes]).stream().pipeThrough(ds);
-    const buf = await new Response(stream).arrayBuffer();
-    return new Uint8Array(buf);
-  }
-
-  async function loadRawTexture(b64, w, h, channels, { srgb = true, nearest = false } = {}) {
-    const data = await decompressBase64(b64);
-    const format = channels === 1 ? THREE.RedFormat : THREE.RGBAFormat;
-    const tex = new THREE.DataTexture(data, w, h, format, THREE.UnsignedByteType);
-    tex.flipY = false;
-    tex.unpackAlignment = 1;
-    tex.needsUpdate = true;
-    return configureTexture(tex, { srgb, nearest });
-  }
-
-  async function loadTexture(url, { srgb = true, nearest = false } = {}) {
-    // Decode embedded images through an ImageBitmap + canvas. This avoids the
-    // file:// "cross-origin image" restriction on WebGL texture uploads, so the
-    // demo can be opened directly as well as served over HTTP.
-    if (url.startsWith('data:')) {
-      const blob = dataUrlToBlob(url);
-      const bmp = await createImageBitmap(blob);
-      const c = document.createElement('canvas');
-      c.width = bmp.width;
-      c.height = bmp.height;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(bmp, 0, 0);
-      bmp.close?.();
-      const tex = new THREE.CanvasTexture(c);
-      return configureTexture(tex, { srgb, nearest });
-    }
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.decoding = 'async';
-      img.onload = () => {
-        const tex = new THREE.Texture(img);
-        tex.needsUpdate = true;
-        configureTexture(tex, { srgb, nearest });
-        resolve(tex);
-      };
-      img.onerror = () => reject(new Error('Failed to load ' + url));
-      img.src = url;
-    });
-  }
-
-  let texturesReady = false;
-  const roundTextures = [];
-
-  async function loadAll() {
-    for (const r of ROUNDS) {
-      const [painting, classmap] = await Promise.all([
-        r.paintingRaw
-          ? loadRawTexture(r.paintingRaw, r.paintingW, r.paintingH, 4, { srgb: true })
-          : loadTexture(r.paintingData || r.painting, { srgb: true }),
-        r.classmapRaw
-          ? loadRawTexture(r.classmapRaw, r.classmapW, r.classmapH, 1, { srgb: false, nearest: true })
-          : loadTexture(r.classmapData || r.classmap, { srgb: false, nearest: true }),
-      ]);
-      roundTextures.push({ painting, classmap });
-    }
-    texturesReady = true;
-  }
 
   /* ---------------------------------------------------------------------
      11. State
@@ -1041,9 +1103,6 @@
     lastDrawTime: 0,
     playing: false,
     speed: 8,
-    finished: false,
-    finishing: false,
-    finish: 0,
     completed: false,
     completedRounds: new Set(),
     playAll: false,
@@ -1076,115 +1135,6 @@
 
   const tmpV = new THREE.Vector3();
   const tmpV2 = new THREE.Vector3();
-
-  /* ---------------------------------------------------------------------
-     12. Painting helpers
-     --------------------------------------------------------------------- */
-  function clearMasks() {
-    for (let i = 0; i < maskCtxs.length; i++) {
-      const ctx = maskCtxs[i];
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, MASK_W, MASK_H);
-      maskDirty[i] = true;
-    }
-  }
-
-  function flushMasks() {
-    for (let i = 0; i < maskTextures.length; i++) {
-      if (maskDirty[i]) {
-        maskTextures[i].needsUpdate = true;
-        maskDirty[i] = false;
-      }
-    }
-  }
-
-  const PAPER_X0 = CANVAS.x0;
-  const PAPER_X1 = CANVAS.x1;
-  const PAPER_Y0 = CANVAS.y0;
-  const PAPER_Y1 = CANVAS.y1;
-
-  function canvasToMask(x, y) {
-    return [
-      ((x - PAPER_X0) / CW) * MASK_W,
-      ((PAPER_Y0 - y) / CH) * MASK_H,
-    ];
-  }
-
-  function drawMaskStroke(seg, f0, f1) {
-    if (f1 - f0 < 1e-5) return;
-    const ctx = maskCtxs[seg.color];
-    if (!ctx) return;
-
-    const x0 = lerp(seg.x0, seg.x1, f0);
-    const y0 = lerp(seg.y0, seg.y1, f0);
-    const z0 = lerp(seg.z0, seg.z1, f0);
-    const x1 = lerp(seg.x0, seg.x1, f1);
-    const y1 = lerp(seg.y0, seg.y1, f1);
-    const z1 = lerp(seg.z0, seg.z1, f1);
-    const [px0, py0] = canvasToMask(x0, y0);
-    const [px1, py1] = canvasToMask(x1, y1);
-
-    const w0 = strokeWidthPx(z0) * MASK_SCALE;
-    const w1 = strokeWidthPx(z1) * MASK_SCALE;
-    if (w0 <= 0.2 && w1 <= 0.2) return;
-
-    const dist = Math.hypot(px1 - px0, py1 - py0);
-    const steps = Math.max(1, Math.ceil(dist / MASK_STEP));
-    const avgW = Math.max(0.9, (w0 + w1) * 0.5);
-
-    // A soft halo first, then a denser core. The shader thresholds the result.
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-    ctx.lineWidth = avgW * 1.55 + 1.5;
-    ctx.beginPath();
-    ctx.moveTo(px0, py0);
-    ctx.lineTo(px1, py1);
-    ctx.stroke();
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.82)';
-    ctx.lineWidth = Math.max(0.8, avgW);
-    ctx.beginPath();
-    ctx.moveTo(px0, py0);
-    ctx.lineTo(px1, py1);
-    ctx.stroke();
-
-    // Variable-width stamps along the segment.
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      const xx = lerp(px0, px1, t);
-      const yy = lerp(py0, py1, t);
-      const r = Math.max(0.45, lerp(w0, w1, t) * 0.5);
-      ctx.fillStyle = 'rgba(255,255,255,0.72)';
-      ctx.beginPath();
-      ctx.arc(xx, yy, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    maskDirty[seg.color] = true;
-  }
-
-  function redrawMasksTo(time) {
-    clearMasks();
-    for (const seg of state.round.segs) {
-      if (seg.t0 >= time) break;
-      const f1 = clamp((time - seg.t0) / Math.max(1e-6, seg.t1 - seg.t0), 0, 1);
-      drawMaskStroke(seg, 0, f1);
-    }
-    flushMasks();
-    state.lastDrawTime = time;
-  }
-
-  function advancePaintTo(prevTime, newTime) {
-    for (const seg of state.round.segs) {
-      if (seg.t0 >= newTime) break;
-      if (seg.t1 <= prevTime) continue;
-      const a = Math.max(seg.t0, prevTime);
-      const b = Math.min(seg.t1, newTime);
-      if (b <= a) continue;
-      const f0 = (a - seg.t0) / Math.max(1e-6, seg.t1 - seg.t0);
-      const f1 = (b - seg.t0) / Math.max(1e-6, seg.t1 - seg.t0);
-      drawMaskStroke(seg, f0, f1);
-    }
-    flushMasks();
-  }
 
   /* ---------------------------------------------------------------------
      13. Timeline sampling
@@ -1304,9 +1254,6 @@
     state.round = ROUNDS[index];
     state.time = 0;
     state.lastDrawTime = 0;
-    state.finished = false;
-    state.finishing = false;
-    state.finish = 0;
     state.completed = false;
     state.playing = false;
     state.playAll = playAll;
@@ -1315,17 +1262,8 @@
     state.currentColor = -1;
     state.seeking = false;
 
-    shaderUniforms.uFinish.value = 0;
-    shaderUniforms.uBrushActive.value = 0;
     arm.setPaintColor(-1);
-    clearMasks();
-    flushMasks();
-
-    const tex = roundTextures[index];
-    if (tex) {
-      canvasMaterial.map = tex.painting;
-      shaderUniforms.uClass.value = tex.classmap;
-    }
+    resetPaint();
 
     // Round rail
     for (const btn of els.roundBtns) {
@@ -1478,19 +1416,10 @@
     ui.lastTickAction = -2;
   }
 
-  function finishProgress(time) {
-    const start = state.round.finishStart;
-    const dur = Math.max(0.8, state.round.total - start);
-    return clamp((time - start) / dur, 0, 1);
-  }
-
   function seek(time, keepPlaying = false) {
     time = clamp(time, 0, state.round.total);
     state.time = time;
     state.completed = false;
-    state.finishing = time >= state.round.finishStart;
-    state.finish = (time >= state.round.total - 1e-4) ? 1 : finishProgress(time);
-    shaderUniforms.uFinish.value = state.finish;
 
     const idx = findActionIndex(time);
     const dipIdx = findDipIndex(time);
@@ -1499,7 +1428,7 @@
     state.currentColor = dipIdx >= 0 ? state.round.dips[dipIdx].color : -1;
     arm.setPaintColor(state.currentColor);
 
-    redrawMasksTo(time);
+    redrawPaintTo(time);
     updateNote(true);
     updateColorUI();
     updateProgressUI(true);
@@ -1521,8 +1450,6 @@
     if (state.completed) return;
     state.completed = true;
     state.playing = false;
-    state.finish = 1;
-    shaderUniforms.uFinish.value = 1;
     state.completedRounds.add(state.roundIndex);
     updatePlayUI();
 
@@ -1548,22 +1475,24 @@
     const n = r.index + 1;
     const titles = ['初稿 · 第 1 轮', '修正 · 第 2 轮', '定稿 · 第 3 轮'];
     const subs = [
-      '39 个动作，初稿画布已保存。Astra 随即进入下一轮。',
-      '31 个动作，第二轮画布已保存。',
-      '33 个动作，终轮画布已保存。',
+      '39 个动作，逐笔绘制完成。Astra 随即进入下一轮。',
+      '31 个动作，第二轮逐笔绘制完成。',
+      '33 个动作，终轮逐笔绘制完成。',
     ];
     els.completeEyebrow.textContent = 'ROUND 0' + n + ' COMPLETE';
     els.completeTitle.textContent = titles[r.index];
     els.completeSub.textContent = subs[r.index];
     els.completeActions.textContent = String(r.actions.length);
     els.completeTime.textContent = fmtDuration(r.recordedTime);
-    els.completeNote.textContent = r.index === 2
-      ? '最终画布与已发布记录 PNG 逐像素一致；过程为上色轨迹的可视化重建。'
-      : '本轮画布与已发布记录 PNG 逐像素一致；Astra 的下一轮从空白画布重新开始。';
-    els.completeImg.src = r.paintingData || r.painting;
-    els.completeDownload.href = r.painting;
-    els.completeDownload.download = 'astra-golden-gate-round-0' + n + '.png';
-    els.completeImg.alt = 'Astra 第 ' + n + ' 轮最终画布';
+    const dataUrl = paintCanvas.toDataURL('image/png');
+    els.completeNote.innerHTML = (r.index === 2
+      ? '本轮画布由 33 个动作逐笔绘制，是近似重建；终点不复制记录 PNG。'
+      : '本轮画布由 ' + r.actions.length + ' 个动作逐笔绘制，是近似重建。')
+      + ' <a class="inline-link" href="' + r.painting + '" download>记录原图</a>';
+    els.completeImg.src = dataUrl;
+    els.completeDownload.href = dataUrl;
+    els.completeDownload.download = 'astra-golden-gate-simulated-round-0' + n + '.png';
+    els.completeImg.alt = '本页逐笔绘制的第 ' + n + ' 轮画布';
     els.completeRef.src = DATA.meta.reference.data || DATA.meta.reference.path;
     els.nextRound.style.display = '';
     els.nextRound.innerHTML = r.index < ROUNDS.length - 1 ? '下一轮 <span>→</span>' : '关闭';
@@ -1924,18 +1853,10 @@
           updateColorUI();
         }
 
-        if (next >= state.round.finishStart) state.finishing = true;
-      }
-      if (state.time >= state.round.finishStart) {
-        state.finishing = true;
-        state.finish = (state.time >= state.round.total - 1e-4) ? 1 : finishProgress(state.time);
-        shaderUniforms.uFinish.value = state.finish;
       }
       updateProgressUI();
 
       if (state.time >= state.round.total - 1e-4) {
-        state.finish = 1;
-        shaderUniforms.uFinish.value = 1;
         if (!state.completed) completeRound();
       }
     }
@@ -1945,17 +1866,6 @@
     const tip = visualTip(raw);
     arm.setTip(tip);
     arm.lastTipForCamera = tip;
-    const rawZ = raw.y - PAPER_Y + TIP_Z;
-    const inContact = rawZ <= CONTACT_Z + 0.004 && state.finish < 0.02 && !state.completed;
-    if (inContact) {
-      shaderUniforms.uBrushUv.value.set(
-        (tip.x - PAPER_X0) / CW,
-        (PAPER_Y0 - (-tip.z)) / CH
-      );
-      shaderUniforms.uBrushActive.value = 1;
-    } else {
-      shaderUniforms.uBrushActive.value = 0;
-    }
 
     updateCamera(dt);
     updateRipplesAndDust(dt, elapsed);
@@ -1992,21 +1902,13 @@
   /* ---------------------------------------------------------------------
      22. Boot
      --------------------------------------------------------------------- */
-  async function boot() {
+  function boot() {
     resize();
     applyCameraPreset('overview', true);
-    // initial pose: round 3, t=0, blank canvas
+    // Preload the reference used by the completion comparison.
+    els.completeRef.src = DATA.meta.reference.data || DATA.meta.reference.path;
+    // Initial pose: round 3, t=0, blank paper.
     setRound(2, { autoplay: false });
-    try {
-      await loadAll();
-    } catch (err) {
-      console.error(err);
-      els.loading.innerHTML = '<div class="loading-inner"><p>资源加载失败</p><span>请通过本地 HTTP 服务打开（见 README）</span></div>';
-      return;
-    }
-    // setRound was called before textures were ready; re-apply the current round
-    const idx = state.roundIndex;
-    setRound(idx, { autoplay: false });
     els.loading.classList.add('is-gone');
     setTimeout(() => { els.loading.style.display = 'none'; }, 760);
     requestAnimationFrame(frame);
@@ -2015,7 +1917,8 @@
   // Small debug surface used by the visual QA scripts; harmless in production.
   window.__ASTRA = {
     state, ROUNDS, seek, setRound, applyCameraPreset, togglePlay, play, pause,
-    arm, camera, cam, renderer, maskCanvases, maskTextures, shaderUniforms, canvasMaterial,
+    arm, camera, cam, renderer, paintCanvas, paintCtx, paintTexture, canvasMaterial,
+    BRUSH_STAMPS, drawPaintSegment, redrawPaintTo, strokeWidthPx,
     scene, previewScene, shadowPlane, dust, key,
   };
 

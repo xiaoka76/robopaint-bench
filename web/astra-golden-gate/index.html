@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0d0e">
 <title>金门大桥 · GPT-6 Astra 绘画过程复现</title>
-<meta name="description" content="用 Three.js 复现 GPT-6 Astra 在金门大桥任务中的机械臂作画过程。动作轨迹来自公开记录，最终画布为原始 PNG。">
+<meta name="description" content="用 Three.js 复现 GPT-6 Astra 在金门大桥任务中的机械臂作画过程。动作轨迹来自公开记录，画布由真实轨迹逐笔绘制。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0d0e'/%3E%3Cpath d='M5 24h22M9 24V11l7 5 7-5v13M9 15h14' stroke='%23e03416' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -120,7 +120,7 @@
       <button class="primary-btn" id="btn-start-final" type="button">播放第 3 轮 <span>→</span></button>
       <button class="ghost-btn" id="btn-start-all" type="button">从第 1 轮开始</button>
     </div>
-    <p class="intro-note">动作轨迹与画布来自公开记录；机械臂、光照与铺色过程为浏览器中的可视化重建。最终画布使用同轮记录的原始 PNG。</p>
+    <p class="intro-note">动作轨迹与蘸色来自公开记录；机械臂、光照与笔触铺设为浏览器中的重建。画布由真实轨迹逐笔绘制，终点为近似效果，不追求与记录原图逐像素一致。</p>
     <p class="intro-credit">Reference photo: Frank Schulenburg · CC BY-SA 4.0</p>
   </div>
 </div>
@@ -142,18 +142,18 @@
     </div>
     <div class="compare-frame">
       <div class="compare-slider" id="compare-slider">
-        <img id="complete-img" class="compare-painting" alt="Astra 该轮最终画布">
+        <img id="complete-img" class="compare-painting" alt="本页逐笔绘制的该轮画布">
         <div class="compare-ref-clip" id="compare-ref-clip"><img id="complete-ref" class="compare-ref" alt="金门大桥参考照片"></div>
         <input type="range" id="compare-range" min="0" max="100" value="50" aria-label="参考照片与画作的对比位置">
         <span class="compare-handle" id="compare-handle" aria-hidden="true"></span>
         <span class="compare-label left">REFERENCE</span>
-        <span class="compare-label right">ASTRA · PAINTING</span>
+        <span class="compare-label right">SIMULATED · PAINTING</span>
       </div>
     </div>
     <div class="complete-foot">
-      <p id="complete-note">最终画布与已发布记录 PNG 逐像素一致；过程为上色轨迹的可视化重建。</p>
+      <p id="complete-note">本轮画布由记录轨迹逐笔绘制，为近似重建；记录原图保留作对照。</p>
       <div class="modal-actions">
-        <a class="ghost-btn" id="complete-download" download>原始 PNG</a>
+        <a class="ghost-btn" id="complete-download" download>保存画作</a>
         <button class="ghost-btn" id="btn-replay-round" type="button">重播本轮</button>
         <button class="primary-btn" id="btn-next-round" type="button">下一轮 <span>→</span></button>
       </div>
@@ -170,12 +170,13 @@
       <section>
         <h4>什么是真实的</h4>
         <p>画面里的机械臂末端轨迹、每段动作的时长、蘸取的颜料类型，都来自 GPT-6 Astra 的公开评测记录：AgentArk Task 107 · RobotPainting，金门大桥参考图任务，seed 107，Codex SDK 接入，推理强度 <code>ultra</code>，2026-10-19。三轮分别有 39 / 31 / 33 个动作，共 103 个。</p>
-        <p>每轮结束时的画布，直接使用记录中保存的 PNG，没有重绘或美化。三轮画布的 SHA-256 已写入页面数据。</p>
+        <p>每轮结束时的记录画布保存在 <code>assets/painting-01..03.png</code>，作为对照保留；页面内的画布不读取这些 PNG 的像素，也不使用分色遮罩。三轮记录画布的 SHA-256 已写入页面数据。</p>
       </section>
       <section>
         <h4>什么是重建的</h4>
         <p>浏览器里没有 Unity、物理引擎或原始任务资产。Panda 机械臂、桌面、颜料盘、光照和笔触铺设都是 Three.js 中的近似重建；动作位置只取末端轨迹，不等价于原始关节控制。</p>
-        <p>为了让过程看起来接近真实落笔，页面把每一轮的最终画布按“当前笔触颜色”分色，再沿真实轨迹逐笔显露。这只是呈现方式，不代表原始渲染器逐帧的中间画布。落笔宽度由记录的动作高度估计，并非真实笔刷物理。</p>
+        <p>为了让过程接近真实落笔，页面把每个动作的折线路径当成笔刷轨迹：笔尖越低（记录 z 越小），笔触越宽；抬笔时宽度收细到吊索级别。颜料由 Canvas 2D 笔刷沿轨迹逐笔叠加到 1024×725 的画布纹理上，再贴到 3D 纸面；纸边、纸纹和笔毛纹理也是程序生成的。</p>
+        <p>这仍是近似重建，不代表原 Unity 渲染器的中间帧，也不是真实笔刷物理；终点只要求接近记录画作，不追求逐像素一致。</p>
       </section>
       <section>
         <h4>数据与来源</h4>
@@ -185,7 +186,7 @@
       <section>
         <h4>边界说明</h4>
         <p>这是一个<b>回放演示</b>，不是标准基准运行，也不是对原 Unity 环境的像素级复现；不构成画质评分或模型排名。页面不调用任何模型，也不重新执行评测。</p>
-        <p>技术栈：Three.js r160、Canvas 2D 笔迹遮罩、自定义分色显露着色器。拖动旋转，滚轮缩放；<kbd>空格</kbd> 播放/暂停，<kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> 切换轮次，<kbd>R</kbd> 重播。</p>
+        <p>技术栈：Three.js r160、Canvas 2D 笔刷沉积、CanvasTexture。拖动旋转，滚轮缩放；<kbd>空格</kbd> 播放/暂停，<kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> 切换轮次，<kbd>R</kbd> 重播。</p>
       </section>
     </div>
     <div class="about-foot">

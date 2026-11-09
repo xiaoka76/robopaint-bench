@@ -632,10 +632,10 @@ body.is-playing .play-btn .icon-pause { display: block; }
 .complete-stats div { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
 .complete-stats b { font-family: var(--mono); font-size: 18px; font-weight: 450; }
 .complete-stats span { font-size: 8px; letter-spacing: 0.12em; color: var(--muted-2); }
-.compare-frame { width: 100%; max-width: 760px; margin: 0 auto; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: #0d0f10; }
+.compare-frame { width: 100%; max-width: min(760px, calc((88vh - 280px) * 1.412)); margin: 0 auto; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: #0d0f10; }
 .compare-slider { position: relative; width: 100%; aspect-ratio: 1024 / 725; overflow: hidden; user-select: none; }
 .compare-painting, .compare-ref { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
-.compare-ref-clip { position: absolute; inset: 0; width: 50%; overflow: hidden; border-right: 1px solid rgba(255,255,255,0.5); }
+.compare-ref-clip { position: absolute; inset: 0; width: 50%; overflow: hidden; border-right: 1px solid rgba(255,255,255,0.5); background: #1b1f22; }
 .compare-ref-clip .compare-ref { width: auto; height: 100%; max-width: none; }
 .compare-ref-clip { width: 50%; }
 .compare-ref-clip .compare-ref { width: 100%; height: 100%; object-fit: cover; }
@@ -665,6 +665,8 @@ body.is-playing .play-btn .icon-pause { display: block; }
 .modal-actions { display: flex; gap: 10px; flex-shrink: 0; }
 .modal-actions .primary-btn, .modal-actions .ghost-btn { padding: 11px 17px; font-size: 10.5px; }
 .modal-actions a.ghost-btn { display: inline-flex; align-items: center; text-decoration: none; }
+.inline-link { color: var(--accent-soft); text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.inline-link:hover { color: #fff; }
 
 .about-card { width: min(1040px, 94vw); }
 .about-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 26px 42px; margin-top: 22px; }

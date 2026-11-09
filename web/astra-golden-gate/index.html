@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d0e">
+<title>金门大桥 · GPT-6 Astra 绘画过程复现</title>
+<meta name="description" content="用 Three.js 复现 GPT-6 Astra 在金门大桥任务中的机械臂作画过程。动作轨迹来自公开记录，最终画布为原始 PNG。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0d0e'/%3E%3Cpath d='M5 24h22M9 24V11l7 5 7-5v13M9 15h14' stroke='%23e03416' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="intro-open">
+<canvas id="scene" aria-label="Three.js 三维机械臂绘画场景"></canvas>
+<div class="scene-vignette" aria-hidden="true"></div>
+<div class="scene-grain" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-text">ROBOPAINTBENCH <i>·</i> TASK 107</span>
+  </div>
+  <div class="top-actions">
+    <span class="top-status" id="top-status"><span class="status-dot"></span> standard run · 2026-10-19</span>
+    <button class="ghost-btn" id="btn-about" type="button">关于 / 方法</button>
+  </div>
+</header>
+
+<main class="stage">
+  <section class="hero" id="hero">
+    <p class="eyebrow">GPT-6 ASTRA <span>×</span> GOLDEN GATE BRIDGE</p>
+    <h1>金门大桥</h1>
+    <p class="hero-sub">机械臂作画过程的浏览器复现<span class="sep">·</span>3 轮 ICL<span class="sep">·</span>103 个动作</p>
+  </section>
+
+  <nav class="round-rail" id="round-rail" aria-label="选择绘画轮次">
+    <button class="round-btn" type="button" data-round="0">
+      <span class="round-num">01</span><span class="round-label">初稿</span><span class="round-pip"></span>
+    </button>
+    <button class="round-btn" type="button" data-round="1">
+      <span class="round-num">02</span><span class="round-label">修正</span><span class="round-pip"></span>
+    </button>
+    <button class="round-btn is-active" type="button" data-round="2">
+      <span class="round-num">03</span><span class="round-label">定稿</span><span class="round-pip"></span>
+    </button>
+  </nav>
+
+  <aside class="preview-card" id="preview-card" aria-label="实时画布预览">
+    <div class="preview-head">
+      <span class="live-dot" aria-hidden="true"></span>
+      <span class="preview-title">LIVE CANVAS</span>
+      <span class="preview-round" id="preview-round">ROUND 03</span>
+    </div>
+    <div class="preview-frame" id="preview-frame">
+      <div class="preview-corner tl" aria-hidden="true"></div>
+      <div class="preview-corner tr" aria-hidden="true"></div>
+      <div class="preview-corner bl" aria-hidden="true"></div>
+      <div class="preview-corner br" aria-hidden="true"></div>
+    </div>
+    <div class="preview-foot">
+      <span class="preview-color" id="preview-color"><i></i><b>未蘸颜料</b></span>
+      <span class="preview-pct" id="preview-pct">0%</span>
+    </div>
+  </aside>
+
+  <section class="note-card" id="note-card" aria-live="polite">
+    <div class="note-meta">
+      <span class="note-round" id="note-round">ROUND 03</span>
+      <span class="note-phase" id="note-phase">天空</span>
+      <span class="note-count" id="note-count">动作 1 / 33</span>
+    </div>
+    <p class="note-zh" id="note-zh">正在准备画布与颜料。</p>
+    <p class="note-en" id="note-en">Astra’s recorded reasoning for this action.</p>
+  </section>
+</main>
+
+<footer class="bottom-bar" id="bottom-bar">
+  <div class="transport">
+    <button class="icon-btn" id="btn-restart" type="button" title="重新开始本轮 (R)" aria-label="重新开始本轮">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9.5A7.5 7.5 0 1 1 5 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M4.5 4.5v5h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="play-btn" id="btn-play" type="button" title="播放 / 暂停 (空格)" aria-label="播放">
+      <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>
+      <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.6v14H7zM13.4 5H17v14h-3.6z" fill="currentColor"/></svg>
+    </button>
+    <div class="time-read" aria-label="记录时间">
+      <span id="time-current">00:00</span>
+      <span class="time-sep">/</span>
+      <span id="time-total">00:00</span>
+    </div>
+  </div>
+
+  <div class="timeline-wrap">
+    <div class="timeline-ticks" id="timeline-ticks" aria-hidden="true"></div>
+    <input type="range" id="timeline" min="0" max="1000" step="1" value="0" aria-label="播放进度">
+  </div>
+
+  <div class="controls">
+    <button class="chip" id="btn-speed" type="button" title="播放速度">8×</button>
+    <div class="camera-group" role="group" aria-label="镜头">
+      <button class="chip cam-btn is-active" type="button" data-cam="overview" title="全景">全景</button>
+      <button class="chip cam-btn" type="button" data-cam="canvas" title="俯看画布">画布</button>
+      <button class="chip cam-btn" type="button" data-cam="side" title="侧视">侧视</button>
+      <button class="chip cam-btn" type="button" data-cam="follow" title="跟随笔尖">跟随</button>
+    </div>
+  </div>
+</footer>
+
+<div class="intro" id="intro">
+  <div class="intro-panel">
+    <div class="intro-rule" aria-hidden="true"></div>
+    <p class="eyebrow">GOLDEN GATE BRIDGE <span>·</span> A PAINTING IN 103 ACTIONS</p>
+    <h2>看 Astra<br>画完金门大桥</h2>
+    <p class="intro-lede">GPT-6 Astra 用一只画笔、十格颜料和一张空白画纸，连续三轮把同一张参考照片画成金门大桥。这里用 Three.js 复现它的落笔过程。</p>
+    <div class="intro-facts">
+      <div><b>103</b><span>真实动作</span></div>
+      <div><b>3</b><span>连续画布</span></div>
+      <div><b>9:18</b><span>第 3 轮记录时长</span></div>
+    </div>
+    <div class="intro-actions">
+      <button class="primary-btn" id="btn-start-final" type="button">播放第 3 轮 <span>→</span></button>
+      <button class="ghost-btn" id="btn-start-all" type="button">从第 1 轮开始</button>
+    </div>
+    <p class="intro-note">动作轨迹与画布来自公开记录；机械臂、光照与铺色过程为浏览器中的可视化重建。最终画布使用同轮记录的原始 PNG。</p>
+    <p class="intro-credit">Reference photo: Frank Schulenburg · CC BY-SA 4.0</p>
+  </div>
+</div>
+
+<div class="modal" id="complete-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="complete-title">
+  <div class="modal-card complete-card">
+    <button class="modal-close" type="button" data-close="complete-modal" aria-label="关闭">×</button>
+    <div class="complete-head">
+      <div>
+        <p class="eyebrow" id="complete-eyebrow">ROUND 03 COMPLETE</p>
+        <h3 id="complete-title">定稿 · 金门大桥</h3>
+        <p class="complete-sub" id="complete-sub">33 个动作，终轮画布已保存。</p>
+      </div>
+      <div class="complete-stats">
+        <div><b id="complete-actions">33</b><span>动作</span></div>
+        <div><b id="complete-time">09:18</b><span>记录时长</span></div>
+        <div><b>100%</b><span>画布</span></div>
+      </div>
+    </div>
+    <div class="compare-frame">
+      <div class="compare-slider" id="compare-slider">
+        <img id="complete-img" class="compare-painting" alt="Astra 该轮最终画布">
+        <div class="compare-ref-clip" id="compare-ref-clip"><img id="complete-ref" class="compare-ref" alt="金门大桥参考照片"></div>
+        <input type="range" id="compare-range" min="0" max="100" value="50" aria-label="参考照片与画作的对比位置">
+        <span class="compare-handle" id="compare-handle" aria-hidden="true"></span>
+        <span class="compare-label left">REFERENCE</span>
+        <span class="compare-label right">ASTRA · PAINTING</span>
+      </div>
+    </div>
+    <div class="complete-foot">
+      <p id="complete-note">最终画布与已发布记录 PNG 逐像素一致；过程为上色轨迹的可视化重建。</p>
+      <div class="modal-actions">
+        <a class="ghost-btn" id="complete-download" download>原始 PNG</a>
+        <button class="ghost-btn" id="btn-replay-round" type="button">重播本轮</button>
+        <button class="primary-btn" id="btn-next-round" type="button">下一轮 <span>→</span></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="about-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="about-title">
+  <div class="modal-card about-card">
+    <button class="modal-close" type="button" data-close="about-modal" aria-label="关闭">×</button>
+    <p class="eyebrow">ABOUT THIS RECONSTRUCTION</p>
+    <h3 id="about-title">这不是录像，也不是官方仿真</h3>
+    <div class="about-grid">
+      <section>
+        <h4>什么是真实的</h4>
+        <p>画面里的机械臂末端轨迹、每段动作的时长、蘸取的颜料类型，都来自 GPT-6 Astra 的公开评测记录：AgentArk Task 107 · RobotPainting，金门大桥参考图任务，seed 107，Codex SDK 接入，推理强度 <code>ultra</code>，2026-10-19。三轮分别有 39 / 31 / 33 个动作，共 103 个。</p>
+        <p>每轮结束时的画布，直接使用记录中保存的 PNG，没有重绘或美化。三轮画布的 SHA-256 已写入页面数据。</p>
+      </section>
+      <section>
+        <h4>什么是重建的</h4>
+        <p>浏览器里没有 Unity、物理引擎或原始任务资产。Panda 机械臂、桌面、颜料盘、光照和笔触铺设都是 Three.js 中的近似重建；动作位置只取末端轨迹，不等价于原始关节控制。</p>
+        <p>为了让过程看起来接近真实落笔，页面把每一轮的最终画布按“当前笔触颜色”分色，再沿真实轨迹逐笔显露。这只是呈现方式，不代表原始渲染器逐帧的中间画布。落笔宽度由记录的动作高度估计，并非真实笔刷物理。</p>
+      </section>
+      <section>
+        <h4>数据与来源</h4>
+        <p>记录：<a href="https://huggingface.co/datasets/P90-RushB/AgentArk" target="_blank" rel="noopener">P90-RushB/AgentArk</a> · <code>golden_gate/gpt-6-astra/20261019-codex-ultra</code>。结果文件 SHA-256 <code>37397383…9bc72c61</code>。</p>
+        <p>参考照片：Frank Schulenburg，<a href="https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg" target="_blank" rel="noopener">Wikimedia Commons</a>，CC BY-SA 4.0。画作与评测资料来自 RoboPaintBench / AgentArk 项目。</p>
+      </section>
+      <section>
+        <h4>边界说明</h4>
+        <p>这是一个<b>回放演示</b>，不是标准基准运行，也不是对原 Unity 环境的像素级复现；不构成画质评分或模型排名。页面不调用任何模型，也不重新执行评测。</p>
+        <p>技术栈：Three.js r160、Canvas 2D 笔迹遮罩、自定义分色显露着色器。拖动旋转，滚轮缩放；<kbd>空格</kbd> 播放/暂停，<kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> 切换轮次，<kbd>R</kbd> 重播。</p>
+      </section>
+    </div>
+    <div class="about-foot">
+      <span>RoboPaintBench · Task 107</span>
+      <span>Built for the browser, not for the leaderboard.</span>
+    </div>
+  </div>
+</div>
+
+<div class="loading" id="loading">
+  <div class="loading-inner">
+    <div class="loading-mark" aria-hidden="true"></div>
+    <p>准备画布</p>
+    <span>LOADING RECORDED ACTIONS</span>
+  </div>
+</div>
+
+<script src="lib/three.min.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
